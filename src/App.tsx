@@ -7,6 +7,7 @@ import { AudioPlayerBar } from './components/AudioPlayerBar';
 import { PresetSelector, PRESETS } from './components/PresetSelector';
 import { HistoryDrawer } from './components/HistoryDrawer';
 import { speechManager } from './services/speechSynthesisService';
+import { safeFetchJson } from './services/apiClient';
 import {
   AIVoice,
   VoiceStyle,
@@ -141,8 +142,7 @@ export default function App() {
 
   // Load server voices and check health on mount
   useEffect(() => {
-    fetch('/api/health')
-      .then((res) => res.json())
+    safeFetchJson('/api/health')
       .then((data) => {
         if (data && typeof data.hasApiKey === 'boolean') {
           setHasApiKey(data.hasApiKey);
@@ -151,13 +151,16 @@ export default function App() {
           }
         }
       })
-      .catch(() => {});
+      .catch(() => {
+        // If server is not responding (e.g. static on Vercel or no API route)
+        setHasApiKey(false);
+        setEngine('browser');
+      });
 
-    fetch('/api/tts/voices')
-      .then((res) => res.json())
+    safeFetchJson('/api/tts/voices')
       .then((data) => {
-        if (data.voices) setAiVoices(data.voices);
-        if (data.styles) setVoiceStyles(data.styles);
+        if (data && data.voices) setAiVoices(data.voices);
+        if (data && data.styles) setVoiceStyles(data.styles);
       })
       .catch(() => {});
   }, []);
@@ -234,7 +237,7 @@ export default function App() {
       setIsGenerating(true);
       try {
         const activeStyle = voiceStyles.find((s) => s.id === selectedStyleId);
-        const res = await fetch('/api/tts/generate', {
+        const data = await safeFetchJson('/api/tts/generate', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -244,11 +247,6 @@ export default function App() {
             model: 'gemini-3.8-flash-lite-tts',
           }),
         });
-
-        const data = await res.json();
-        if (!res.ok || data.error) {
-          throw new Error(data.error || 'Error en el servidor al generar la voz.');
-        }
 
         const newAudioUrl = base64ToBlobUrl(data.audioBase64, data.mimeType || 'audio/wav');
         setAudioUrl(newAudioUrl);
@@ -349,7 +347,7 @@ export default function App() {
     setIsGenerating(true);
 
     try {
-      const res = await fetch('/api/tts/dialogue', {
+      const data = await safeFetchJson('/api/tts/dialogue', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -360,11 +358,6 @@ export default function App() {
           speaker2Voice,
         }),
       });
-
-      const data = await res.json();
-      if (!res.ok || data.error) {
-        throw new Error(data.error || 'Error al generar diálogo.');
-      }
 
       const newAudioUrl = base64ToBlobUrl(data.audioBase64, data.mimeType || 'audio/wav');
       setAudioUrl(newAudioUrl);
@@ -419,7 +412,7 @@ export default function App() {
     setIsOptimizing(true);
     try {
       const styleObj = voiceStyles.find((s) => s.id === selectedStyleId);
-      const res = await fetch('/api/tts/optimize-script', {
+      const data = await safeFetchJson('/api/tts/optimize-script', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -427,8 +420,7 @@ export default function App() {
           targetTone: styleObj?.label || 'locución natural',
         }),
       });
-      const data = await res.json();
-      if (data.optimizedText) {
+      if (data && data.optimizedText) {
         setText(data.optimizedText);
         showToast('success', 'Texto optimizado para lectura y dicción natural.');
       }
