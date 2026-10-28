@@ -1,0 +1,6 @@
+{
+  "name": "VocalStudio - Texto a Voz con IA",
+  "description": "Estudio profesional de texto a voz con voces neuronales de alta fidelidad de Gemini, síntesis nativa del navegador, estilos vocales, diálogos y exportación en MP3 y WAV.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
