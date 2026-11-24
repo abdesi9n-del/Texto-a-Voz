@@ -100,6 +100,7 @@ export default async function handler(req, res) {
     };
 
     let base64Audio = null;
+    let audioMimeType = 'audio/wav';
 
     try {
       const { GoogleGenAI } = await import('@google/genai');
@@ -121,9 +122,12 @@ export default async function handler(req, res) {
         },
       });
 
-      const candidate = response.candidates?.[0];
-      const inlineData = candidate?.content?.parts?.[0]?.inlineData;
-      base64Audio = inlineData?.data || null;
+      const partsList = response.candidates?.[0]?.content?.parts || [];
+      const audioPart = partsList.find((p) => p.inlineData?.data);
+      base64Audio = audioPart?.inlineData?.data || null;
+      if (audioPart?.inlineData?.mimeType) {
+        audioMimeType = audioPart.inlineData.mimeType;
+      }
     } catch (sdkErr) {
       console.warn('SDK dialogue failed, trying REST API:', sdkErr?.message);
       const restRes = await fetch(
@@ -153,8 +157,12 @@ export default async function handler(req, res) {
         );
       }
 
-      base64Audio =
-        restJson?.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data || null;
+      const partsList = restJson?.candidates?.[0]?.content?.parts || [];
+      const audioPart = partsList.find((p) => p.inlineData?.data);
+      base64Audio = audioPart?.inlineData?.data || null;
+      if (audioPart?.inlineData?.mimeType) {
+        audioMimeType = audioPart.inlineData.mimeType;
+      }
     }
 
     if (!base64Audio) {
@@ -165,7 +173,7 @@ export default async function handler(req, res) {
 
     return sendJson(res, 200, {
       audioBase64: base64Audio,
-      mimeType: 'audio/wav',
+      mimeType: audioMimeType,
       speakers: [
         { name: speaker1Name, voice: speaker1Voice },
         { name: speaker2Name, voice: speaker2Voice },

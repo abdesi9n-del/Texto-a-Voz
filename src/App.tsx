@@ -165,26 +165,46 @@ export default function App() {
       .catch(() => {});
   }, []);
 
-  // Load browser voices
+  // Load browser voices persistently (handles async voice loading in Chrome/Safari/Edge)
   useEffect(() => {
-    speechManager.getVoices().then((voices) => {
+    const applyVoices = (voices: SpeechSynthesisVoice[]) => {
       setBrowserVoices(voices);
       if (voices.length > 0) {
-        // Find best Spanish voice default
-        const esVoice =
-          voices.find((v) => v.lang.startsWith('es') || v.lang.startsWith('ES')) ||
-          voices[0];
-        setSelectedBrowserVoice(esVoice);
+        setSelectedBrowserVoice((prev) => {
+          if (prev && voices.some((v) => v.voiceURI === prev.voiceURI)) {
+            return prev;
+          }
+          return (
+            voices.find((v) => v.lang.toLowerCase().startsWith('es')) || voices[0]
+          );
+        });
       }
-    });
+    };
+
+    speechManager.getVoices().then(applyVoices);
+
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      const onVoicesChanged = () => {
+        applyVoices(window.speechSynthesis.getVoices());
+      };
+      window.speechSynthesis.addEventListener('voiceschanged', onVoicesChanged);
+      return () => {
+        window.speechSynthesis.removeEventListener('voiceschanged', onVoicesChanged);
+      };
+    }
   }, []);
 
-  // Load history from localStorage
+  // Load history from localStorage (strip expired blob: URLs from previous sessions)
   useEffect(() => {
     try {
       const saved = localStorage.getItem('vocalstudio_history_v1');
       if (saved) {
-        setHistory(JSON.parse(saved));
+        const parsed: AudioHistoryItem[] = JSON.parse(saved);
+        const cleaned = parsed.map((item) => ({
+          ...item,
+          audioUrl: item.audioUrl?.startsWith('blob:') ? undefined : item.audioUrl,
+        }));
+        setHistory(cleaned);
       }
     } catch {
       // ignore
@@ -211,15 +231,71 @@ export default function App() {
     }, 4500);
   };
 
-  // Convert base64 audio to Blob URL
+  // Convert base64 audio to valid playable WAV Blob URL (adds RIFF header if raw PCM)
   const base64ToBlobUrl = (base64Data: string, mimeType = 'audio/wav') => {
-    const byteCharacters = atob(base64Data);
-    const byteNumbers = new Array(byteCharacters.length);
+    const cleanBase64 = base64Data.replace(/\s+/g, '');
+    const byteCharacters = atob(cleanBase64);
+    const rawBytes = new Uint8Array(byteCharacters.length);
     for (let i = 0; i < byteCharacters.length; i++) {
-      byteNumbers[i] = byteCharacters.charCodeAt(i);
+      rawBytes[i] = byteCharacters.charCodeAt(i);
     }
-    const byteArray = new Uint8Array(byteNumbers);
-    const blob = new Blob([byteArray], { type: mimeType });
+
+    // Check if audio already has a valid RIFF/WAV header ("RIFF") or ID3/MP3/OGG
+    const isRiff =
+      rawBytes.length >= 4 &&
+      rawBytes[0] === 0x52 &&
+      rawBytes[1] === 0x49 &&
+      rawBytes[2] === 0x46 &&
+      rawBytes[3] === 0x46;
+
+    const isCompressed =
+      mimeType.includes('mp3') ||
+      mimeType.includes('mpeg') ||
+      mimeType.includes('ogg') ||
+      mimeType.includes('webm');
+
+    let finalBytes = rawBytes;
+    let finalMime = mimeType;
+
+    if (!isRiff && !isCompressed) {
+      // Wrap raw 16-bit mono PCM with a 44-byte WAV header
+      const rateMatch = mimeType.match(/rate=(\d+)/i);
+      const sampleRate = rateMatch ? parseInt(rateMatch[1], 10) : 24000;
+      const numChannels = 1;
+      const bitsPerSample = 16;
+      const byteRate = (sampleRate * numChannels * bitsPerSample) / 8;
+      const blockAlign = (numChannels * bitsPerSample) / 8;
+      const dataSize = rawBytes.length;
+
+      const wavBuffer = new ArrayBuffer(44 + dataSize);
+      const view = new DataView(wavBuffer);
+
+      const writeStr = (offset: number, str: string) => {
+        for (let i = 0; i < str.length; i++) {
+          view.setUint8(offset + i, str.charCodeAt(i));
+        }
+      };
+
+      writeStr(0, 'RIFF');
+      view.setUint32(4, 36 + dataSize, true);
+      writeStr(8, 'WAVE');
+      writeStr(12, 'fmt ');
+      view.setUint32(16, 16, true); // PCM chunk size
+      view.setUint16(20, 1, true); // PCM format
+      view.setUint16(22, numChannels, true);
+      view.setUint32(24, sampleRate, true);
+      view.setUint32(28, byteRate, true);
+      view.setUint16(32, blockAlign, true);
+      view.setUint16(34, bitsPerSample, true);
+      writeStr(36, 'data');
+      view.setUint32(40, dataSize, true);
+
+      finalBytes = new Uint8Array(wavBuffer);
+      finalBytes.set(rawBytes, 44);
+      finalMime = 'audio/wav';
+    }
+
+    const blob = new Blob([finalBytes], { type: finalMime });
     return URL.createObjectURL(blob);
   };
 
@@ -284,6 +360,7 @@ export default function App() {
 
   // Play using Web Speech API
   const handlePlayWithBrowser = () => {
+    setAudioUrl(null);
     setIsPlaying(true);
     setIsPaused(false);
     setActiveCharIndex(null);
@@ -294,6 +371,7 @@ export default function App() {
         voice: selectedBrowserVoice,
         rate,
         pitch,
+        lang: selectedBrowserVoice?.lang || 'es-ES',
       },
       {
         onStart: () => {

@@ -46,6 +46,7 @@ export const AudioPlayerBar: React.FC<AudioPlayerBarProps> = ({
   onNotify,
 }) => {
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const lastLoadedUrlRef = useRef<string | null>(null);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [playbackRate, setPlaybackRate] = useState(1);
@@ -74,17 +75,6 @@ export const AudioPlayerBar: React.FC<AudioPlayerBarProps> = ({
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  // Sync internal HTMLAudioElement when audioUrl changes
-  useEffect(() => {
-    if (!audioRef.current) return;
-    if (audioUrl) {
-      audioRef.current.src = audioUrl;
-      audioRef.current.playbackRate = playbackRate;
-      audioRef.current.volume = isMuted ? 0 : volume;
-      audioRef.current.load();
-    }
-  }, [audioUrl]);
-
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio) return;
@@ -92,38 +82,95 @@ export const AudioPlayerBar: React.FC<AudioPlayerBarProps> = ({
     const onTimeUpdate = () => setCurrentTime(audio.currentTime);
     const onLoadedMetadata = () => {
       setDuration(audio.duration || 0);
+      audio.playbackRate = playbackRate;
+      audio.volume = isMuted ? 0 : volume;
     };
     const onEnded = () => {
       onStop();
       setCurrentTime(0);
     };
+    const onError = () => {
+      onStop();
+      onNotify?.('error', 'No se pudo reproducir el archivo de audio.');
+    };
 
     audio.addEventListener('timeupdate', onTimeUpdate);
     audio.addEventListener('loadedmetadata', onLoadedMetadata);
     audio.addEventListener('ended', onEnded);
+    audio.addEventListener('error', onError);
 
     return () => {
       audio.removeEventListener('timeupdate', onTimeUpdate);
       audio.removeEventListener('loadedmetadata', onLoadedMetadata);
       audio.removeEventListener('ended', onEnded);
+      audio.removeEventListener('error', onError);
     };
-  }, [onStop]);
+  }, [onStop, onNotify, playbackRate, isMuted, volume]);
 
-  // Synchronize playback if audioUrl is active
+  // Synchronize source and playback reliably
   useEffect(() => {
     const audio = audioRef.current;
-    if (!audio || !audioUrl) return;
+    if (!audio) return;
+
+    if (!audioUrl) {
+      if (lastLoadedUrlRef.current) {
+        audio.pause();
+        audio.removeAttribute('src');
+        audio.load();
+        lastLoadedUrlRef.current = null;
+        setCurrentTime(0);
+        setDuration(0);
+      }
+      return;
+    }
+
+    if (lastLoadedUrlRef.current !== audioUrl) {
+      lastLoadedUrlRef.current = audioUrl;
+      audio.src = audioUrl;
+      audio.playbackRate = playbackRate;
+      audio.volume = isMuted ? 0 : volume;
+      audio.load();
+      setCurrentTime(0);
+    }
 
     if (isPlaying && !isPaused) {
-      audio.play().catch(() => {});
+      const playPromise = audio.play();
+      if (playPromise !== undefined) {
+        playPromise.catch((err: any) => {
+          if (err?.name === 'AbortError') return;
+          if (err?.name === 'NotAllowedError') {
+            onPause();
+            onNotify?.(
+              'info',
+              'Audio listo. Presiona Reproducir (▶) para iniciar la reproducción.'
+            );
+          } else {
+            console.error('Error al reproducir audio:', err);
+          }
+        });
+      }
     } else if (isPaused) {
       audio.pause();
     } else {
       audio.pause();
-      audio.currentTime = 0;
+      try {
+        audio.currentTime = 0;
+      } catch {
+        // ignore if not ready
+      }
       setCurrentTime(0);
     }
   }, [isPlaying, isPaused, audioUrl]);
+
+  const handleDirectResume = () => {
+    const audio = audioRef.current;
+    if (audio && audioUrl) {
+      audio.volume = isMuted ? 0 : volume;
+      audio.playbackRate = playbackRate;
+      audio.play().catch(() => {});
+    }
+    onResume();
+  };
 
   const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
     const time = parseFloat(e.target.value);
@@ -160,7 +207,6 @@ export const AudioPlayerBar: React.FC<AudioPlayerBarProps> = ({
     }
   };
 
-  // Download as MP3 (with direct LameJS conversion)
   const handleDownloadMp3 = async (bitrate = selectedBitrate) => {
     if (!audioUrl) return;
     setIsConvertingMp3(true);
@@ -182,7 +228,6 @@ export const AudioPlayerBar: React.FC<AudioPlayerBarProps> = ({
     }
   };
 
-  // Download as native WAV
   const handleDownloadWav = () => {
     if (!audioUrl) return;
     setShowDownloadMenu(false);
@@ -213,8 +258,8 @@ export const AudioPlayerBar: React.FC<AudioPlayerBarProps> = ({
 
   return (
     <div className="w-full bg-slate-900/95 border border-slate-800 rounded-2xl p-4 sm:p-5 shadow-2xl backdrop-blur-xl transition-all">
-      {/* Hidden audio element for WAV playback */}
-      <audio ref={audioRef} preload="metadata" />
+      {/* Hidden audio element for native WAV playback */}
+      <audio ref={audioRef} preload="auto" playsInline />
 
       {/* Header with status badge & format downloads */}
       <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
@@ -222,7 +267,7 @@ export const AudioPlayerBar: React.FC<AudioPlayerBarProps> = ({
           <div className="relative flex items-center justify-center w-8 h-8 rounded-lg bg-indigo-600/20 text-indigo-400 border border-indigo-500/30">
             {isGenerating ? (
               <Sparkles className="w-4 h-4 animate-spin text-amber-400" />
-            ) : isPlaying ? (
+            ) : isPlaying && !isPaused ? (
               <span className="flex h-2.5 w-2.5 relative">
                 <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
                 <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
@@ -236,8 +281,10 @@ export const AudioPlayerBar: React.FC<AudioPlayerBarProps> = ({
               <span className="text-sm font-semibold text-slate-200">
                 {isGenerating
                   ? 'Sintetizando audio...'
-                  : isPlaying
+                  : isPlaying && !isPaused
                   ? 'Reproduciendo voz'
+                  : isPaused
+                  ? 'Reproducción en pausa'
                   : audioUrl
                   ? 'Audio listo para escuchar y exportar'
                   : 'Listo para locución'}
@@ -256,7 +303,6 @@ export const AudioPlayerBar: React.FC<AudioPlayerBarProps> = ({
         <div className="flex items-center gap-2">
           {audioUrl && (
             <>
-              {/* Speed rate toggle */}
               <button
                 onClick={handleRateChange}
                 title="Cambiar velocidad de reproducción"
@@ -265,9 +311,7 @@ export const AudioPlayerBar: React.FC<AudioPlayerBarProps> = ({
                 {playbackRate}x
               </button>
 
-              {/* Combined MP3 & WAV Download Group */}
               <div className="relative inline-flex rounded-xl shadow-sm" ref={downloadMenuRef}>
-                {/* Primary Button: Descargar MP3 */}
                 <button
                   onClick={() => handleDownloadMp3(selectedBitrate)}
                   disabled={isConvertingMp3}
@@ -290,7 +334,6 @@ export const AudioPlayerBar: React.FC<AudioPlayerBarProps> = ({
                   )}
                 </button>
 
-                {/* Dropdown toggle for options (WAV / different bitrates) */}
                 <button
                   onClick={() => setShowDownloadMenu(!showDownloadMenu)}
                   disabled={isConvertingMp3}
@@ -300,14 +343,12 @@ export const AudioPlayerBar: React.FC<AudioPlayerBarProps> = ({
                   <ChevronDown className="w-3.5 h-3.5" />
                 </button>
 
-                {/* Download formats popover menu */}
                 {showDownloadMenu && (
                   <div className="absolute right-0 top-full mt-1.5 w-60 z-50 bg-slate-900 border border-slate-800 rounded-xl p-2 shadow-2xl backdrop-blur-xl animate-in fade-in zoom-in-95 duration-150">
                     <div className="px-2 py-1.5 text-[11px] font-bold text-slate-400 uppercase tracking-wider border-b border-slate-800/80 mb-1">
                       Opciones de Exportación
                     </div>
 
-                    {/* MP3 Presets */}
                     <div className="space-y-1 mb-2">
                       <div className="text-[10px] text-slate-500 font-semibold px-2 pt-1 flex items-center gap-1">
                         <Music className="w-3 h-3 text-emerald-400" />
@@ -362,7 +403,6 @@ export const AudioPlayerBar: React.FC<AudioPlayerBarProps> = ({
                       </button>
                     </div>
 
-                    {/* WAV Option */}
                     <div className="pt-1.5 border-t border-slate-800/80">
                       <div className="text-[10px] text-slate-500 font-semibold px-2 mb-1 flex items-center gap-1">
                         <FileAudio className="w-3 h-3 text-indigo-400" />
@@ -385,7 +425,6 @@ export const AudioPlayerBar: React.FC<AudioPlayerBarProps> = ({
                 )}
               </div>
 
-              {/* Copy audio DataURI button */}
               <button
                 onClick={handleCopyAudio}
                 title="Copiar enlace DataURI de audio"
@@ -403,7 +442,9 @@ export const AudioPlayerBar: React.FC<AudioPlayerBarProps> = ({
         <Visualizer
           isPlaying={isPlaying}
           isPaused={isPaused}
-          audioElement={audioRef.current}
+          audioUrl={audioUrl}
+          currentTime={currentTime}
+          duration={duration}
           mode="bars"
         />
       </div>
@@ -446,7 +487,7 @@ export const AudioPlayerBar: React.FC<AudioPlayerBarProps> = ({
             </button>
           ) : (
             <button
-              onClick={isPaused ? onResume : onPlay}
+              onClick={isPaused ? handleDirectResume : onPlay}
               disabled={isGenerating}
               className="flex items-center justify-center w-10 h-10 rounded-xl bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white shadow-lg shadow-indigo-600/30 font-bold transition active:scale-95 disabled:opacity-50"
               title="Reproducir / Escuchar"

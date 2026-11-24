@@ -1,9 +1,11 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 
 interface VisualizerProps {
   isPlaying: boolean;
   isPaused?: boolean;
-  audioElement?: HTMLAudioElement | null;
+  audioUrl?: string | null;
+  currentTime?: number;
+  duration?: number;
   mode?: 'bars' | 'wave' | 'circle';
   accentColor?: string;
 }
@@ -11,49 +13,69 @@ interface VisualizerProps {
 export const Visualizer: React.FC<VisualizerProps> = ({
   isPlaying,
   isPaused = false,
-  audioElement,
+  audioUrl = null,
+  currentTime = 0,
+  duration = 0,
   mode = 'bars',
-  accentColor = '#6366f1', // Indigo
+  accentColor = '#6366f1',
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const animationFrameRef = useRef<number | null>(null);
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const analyserRef = useRef<AnalyserNode | null>(null);
-  const sourceRef = useRef<MediaElementAudioSourceNode | null>(null);
+  const [waveformPeaks, setWaveformPeaks] = useState<number[] | null>(null);
 
-  // Setup Web Audio API when audioElement is provided
+  // Decode audioUrl read-only into waveform peaks without hijacking <audio> output
   useEffect(() => {
-    if (!audioElement) return;
-
-    try {
-      if (!audioContextRef.current) {
-        const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-        if (AudioCtx) {
-          const ctx = new AudioCtx();
-          audioContextRef.current = ctx;
-          const analyser = ctx.createAnalyser();
-          analyser.fftSize = 128;
-          analyserRef.current = analyser;
-
-          // Connect element only once
-          try {
-            const source = ctx.createMediaElementSource(audioElement);
-            source.connect(analyser);
-            analyser.connect(ctx.destination);
-            sourceRef.current = source;
-          } catch (e) {
-            // Already connected in some cases
-          }
-        }
-      }
-    } catch (err) {
-      console.warn('AudioContext setup skipped:', err);
+    let cancelled = false;
+    if (!audioUrl) {
+      setWaveformPeaks(null);
+      return;
     }
 
-    return () => {
-      // Audio context cleanup is handled on unmount
+    const extractPeaks = async () => {
+      let ctx: AudioContext | null = null;
+      try {
+        const res = await fetch(audioUrl);
+        const arrayBuffer = await res.arrayBuffer();
+        const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+        if (!AudioCtx || cancelled) return;
+
+        ctx = new AudioCtx();
+        const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+        if (cancelled) return;
+
+        const channelData = audioBuffer.getChannelData(0);
+        const barCount = 48;
+        const blockSize = Math.max(1, Math.floor(channelData.length / barCount));
+        const peaks: number[] = [];
+
+        for (let i = 0; i < barCount; i++) {
+          const start = i * blockSize;
+          let max = 0;
+          for (let j = 0; j < blockSize && start + j < channelData.length; j += 4) {
+            const val = Math.abs(channelData[start + j]);
+            if (val > max) max = val;
+          }
+          peaks.push(Math.min(1, Math.max(0.14, max * 1.4)));
+        }
+
+        if (!cancelled) {
+          setWaveformPeaks(peaks);
+        }
+      } catch {
+        if (!cancelled) setWaveformPeaks(null);
+      } finally {
+        if (ctx && ctx.state !== 'closed') {
+          ctx.close().catch(() => {});
+        }
+      }
     };
-  }, [audioElement]);
+
+    extractPeaks();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [audioUrl]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -68,14 +90,7 @@ export const Visualizer: React.FC<VisualizerProps> = ({
       const height = canvas.height;
       ctx.clearRect(0, 0, width, height);
 
-      let dataArray: Uint8Array | null = null;
-      if (analyserRef.current && isPlaying && !isPaused) {
-        const bufferLength = analyserRef.current.frequencyBinCount;
-        const buffer = new ArrayBuffer(bufferLength);
-        const uintArray = new Uint8Array(buffer);
-        analyserRef.current.getByteFrequencyData(uintArray as any);
-        dataArray = uintArray;
-      }
+      const progress = duration > 0 ? Math.min(1, Math.max(0, currentTime / duration)) : 0;
 
       if (mode === 'bars') {
         const barCount = 48;
@@ -83,31 +98,43 @@ export const Visualizer: React.FC<VisualizerProps> = ({
         const spacing = (width / barCount) * 0.3;
 
         for (let i = 0; i < barCount; i++) {
-          let value = 0.15; // idle baseline
+          let value = 0.15;
 
-          if (isPlaying && !isPaused) {
-            if (dataArray && dataArray.length > 0) {
-              const dataIdx = Math.floor((i / barCount) * (dataArray.length * 0.7));
-              value = Math.max(0.12, (dataArray[dataIdx] || 0) / 255);
+          if (waveformPeaks && waveformPeaks.length === barCount) {
+            const basePeak = waveformPeaks[i];
+            if (isPlaying && !isPaused) {
+              const pulse = 0.12 * Math.sin(phase * 0.15 + i * 0.45);
+              value = Math.min(1, Math.max(0.14, basePeak + pulse));
             } else {
-              // Simulated organic wave for synthetic speech or fallback
-              const freq1 = Math.sin((i * 0.3) + phase * 0.08) * 0.35;
-              const freq2 = Math.cos((i * 0.15) - phase * 0.05) * 0.3;
-              const freq3 = Math.sin((i * 0.5) + phase * 0.12) * 0.2;
-              value = Math.max(0.12, 0.45 + freq1 + freq2 + freq3);
+              value = Math.max(0.14, basePeak * 0.75);
             }
+          } else if (isPlaying && !isPaused) {
+            const freq1 = Math.sin(i * 0.3 + phase * 0.08) * 0.35;
+            const freq2 = Math.cos(i * 0.15 - phase * 0.05) * 0.3;
+            const freq3 = Math.sin(i * 0.5 + phase * 0.12) * 0.2;
+            value = Math.max(0.12, 0.45 + freq1 + freq2 + freq3);
           }
 
           const barHeight = Math.max(4, value * (height - 10));
           const x = i * (barWidth + spacing) + spacing / 2;
           const y = height / 2 - barHeight / 2;
 
-          // Gradient for bars
+          const barRatio = i / barCount;
+          const isPlayedBar = waveformPeaks && duration > 0 && barRatio <= progress;
+
           const gradient = ctx.createLinearGradient(0, y, 0, y + barHeight);
           if (isPlaying && !isPaused) {
-            gradient.addColorStop(0, '#818cf8'); // light indigo
-            gradient.addColorStop(0.5, '#c084fc'); // purple
-            gradient.addColorStop(1, '#38bdf8'); // sky blue
+            if (isPlayedBar || !waveformPeaks) {
+              gradient.addColorStop(0, '#818cf8');
+              gradient.addColorStop(0.5, '#c084fc');
+              gradient.addColorStop(1, '#38bdf8');
+            } else {
+              gradient.addColorStop(0, '#475569');
+              gradient.addColorStop(1, '#334155');
+            }
+          } else if (isPlayedBar) {
+            gradient.addColorStop(0, '#6366f1');
+            gradient.addColorStop(1, '#4f46e5');
           } else {
             gradient.addColorStop(0, '#334155');
             gradient.addColorStop(1, '#1e293b');
@@ -119,7 +146,6 @@ export const Visualizer: React.FC<VisualizerProps> = ({
           ctx.fill();
         }
       } else {
-        // Wave mode
         ctx.beginPath();
         ctx.lineWidth = 3;
         ctx.strokeStyle = isPlaying && !isPaused ? '#a855f7' : '#475569';
@@ -130,7 +156,7 @@ export const Visualizer: React.FC<VisualizerProps> = ({
         for (let i = 0; i < 64; i++) {
           let v = 0;
           if (isPlaying && !isPaused) {
-            v = Math.sin((i * 0.2) + phase * 0.1) * 20 + Math.sin(phase * 0.05 + i * 0.1) * 10;
+            v = Math.sin(i * 0.2 + phase * 0.1) * 20 + Math.sin(phase * 0.05 + i * 0.1) * 10;
           }
           const y = height / 2 + v;
 
@@ -155,7 +181,7 @@ export const Visualizer: React.FC<VisualizerProps> = ({
         cancelAnimationFrame(animationFrameRef.current);
       }
     };
-  }, [isPlaying, isPaused, mode, accentColor]);
+  }, [isPlaying, isPaused, mode, accentColor, waveformPeaks, currentTime, duration]);
 
   return (
     <div className="relative w-full h-16 md:h-20 bg-slate-950/70 border border-slate-800/80 rounded-xl overflow-hidden flex items-center justify-center p-2 backdrop-blur-sm shadow-inner">
@@ -165,7 +191,6 @@ export const Visualizer: React.FC<VisualizerProps> = ({
         height={80}
         className="w-full h-full block"
       />
-      {/* Glow highlight */}
       {isPlaying && !isPaused && (
         <div className="absolute inset-0 bg-gradient-to-r from-indigo-500/10 via-purple-500/10 to-cyan-500/10 pointer-events-none animate-pulse-glow" />
       )}
