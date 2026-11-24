@@ -1,7 +1,6 @@
 /**
  * Safe API client that handles JSON and non-JSON responses gracefully
- * prevents "Unexpected token 'T', 'The page c'... is not valid JSON" errors
- * when deployed to static hosts like Vercel without backend configured.
+ * prevents JSON parsing crashes and interprets Vercel serverless errors.
  */
 
 export async function safeFetchJson<T = any>(
@@ -37,6 +36,13 @@ export async function safeFetchJson<T = any>(
   if (!res.ok) {
     if (data && data.error) {
       throw new Error(data.error);
+    }
+
+    // Vercel serverless crash handler
+    if (text.includes('FUNCTION_INVOCATION_FAILED') || text.includes('A server error has occurred')) {
+      throw new Error(
+        'Error de invocación en Vercel. Asegúrate de haber añadido la variable de entorno GEMINI_API_KEY en Vercel (Project Settings > Environment Variables) y haz un Redeploy. Puedes usar las voces del Navegador mientras tanto.'
+      );
     }
 
     if (res.status === 404) {

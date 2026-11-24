@@ -10,6 +10,7 @@ import {
   Moon,
   Volume2,
   Check,
+  AlertCircle,
 } from 'lucide-react';
 import { AIVoice, VoiceStyle, EngineType } from '../types';
 
@@ -101,6 +102,20 @@ export const VoiceSelector: React.FC<VoiceSelectorProps> = ({
       {/* Engine: Gemini AI */}
       {engine === 'gemini-ai' ? (
         <div className="space-y-4">
+          {!hasApiKey && (
+            <div className="p-3 rounded-xl bg-amber-950/30 border border-amber-800/40 text-amber-200 text-xs flex items-start gap-2.5">
+              <AlertCircle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+              <div className="space-y-1">
+                <span className="font-semibold block text-amber-300">
+                  GEMINI_API_KEY no detectada en Vercel
+                </span>
+                <p className="text-slate-300 text-[11px] leading-relaxed">
+                  Para activar las voces neuronales en Vercel, agrega la variable <code className="bg-amber-950/80 px-1 py-0.5 rounded text-amber-300 font-mono text-[10px]">GEMINI_API_KEY</code> en tu panel de Vercel (<em>Settings &gt; Environment Variables</em>) y haz un <strong>Redeploy</strong>. Mientras tanto, puedes usar el motor del <strong>Navegador</strong> sin costo.
+                </p>
+              </div>
+            </div>
+          )}
+
           <div>
             <div className="flex items-center justify-between mb-2.5">
               <span className="text-xs font-semibold text-slate-300 uppercase tracking-wider">
